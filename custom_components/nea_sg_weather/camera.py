@@ -64,7 +64,6 @@ class NeaRainCamera(Camera):
         self._last_image_time = None
         self._last_image_time_pretty = None
         self._last_image = None
-        self._images = []
         self._last_url = None
         self._platform = "camera"
         self._prefix = config[CONF_SENSORS][CONF_PREFIX]
@@ -103,92 +102,72 @@ class NeaRainCamera(Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        """Return a still image response from the camera."""
+        """Return an animated image from the camera."""
 
-        async def get_image(current_image_time: int) -> bytes | None:
-            url = RAIN_MAP_URL_PREFIX + str(current_image_time) + RAIN_MAP_URL_SUFFIX
+        def ceil_dt(dt, delta):
+            return dt + (datetime.min - dt) % delta
+
+        async def get_image(timestamp: datetime) -> bytes | None:
+            url = RAIN_MAP_URL_PREFIX + timestamp.strftime('%Y%m%d%H%M') + RAIN_MAP_URL_SUFFIX
             _LOGGER.debug("Getting rain map image from %s", url)
             try:
                 async_client = get_async_client(self.hass, verify_ssl=self.verify_ssl)
                 response = await async_client.get(url, headers=RAIN_MAP_HEADERS)
                 response.raise_for_status()
-                self._last_image = response.content
-                self._last_image_time = current_image_time
-                self._last_image_time_pretty = datetime.strptime(
-                    str(current_image_time), "%Y%m%d%H%M"
-                ).isoformat()
-                self._last_url = url
+                return response.content
+
+            except httpx.TimeoutException:
+                _LOGGER.warning("Timeout getting camera image for %s from %s", self._name, url)
+                return
+
+            except (httpx.HTTPStatusError, httpx.RequestError):
+                _LOGGER.warning("Error getting camera image for %s from %s", self._name, url)
+                return
+
+            except Exception as e:
+                _LOGGER.warning(e)
+                return
+
+        td = timedelta(minutes = 5)
+        now = ceil_dt(datetime.now(), td)
+
+        if self._last_image_time == now - td:
+            if not (self._last_image is None):
+                _LOGGER.debug('Return last successfully fetched image')
+                return self._last_image
+
+        timestamps = []
+        start = now - timedelta(minutes = 50)
+        while start < now:
+            timestamps.append(start)
+            start = start + td
+
+        contents = await asyncio.gather(*[get_image(dt) for dt in timestamps])
+
+        images = []
+        for content in contents:
+            if not (content is None):
+                self._last_image = content
+                images.append(Image.open(io.BytesIO(content)))
+
+        if len(images) > 2:
+            buff = io.BytesIO()
+            images[0].save(buff, format='GIF', save_all=True, append_images=images[1:], optimize=False, duration=1000, disposal=2, loop=0)
+            self._last_image = buff.getvalue() 
+
+            # succesfully fetched all images
+            if len(images) == len(timestamps):
+                self._last_image_time = timestamps[-1]
+                self._last_image_time_pretty = timestamps[-1].isoformat()
+                self._last_url = RAIN_MAP_URL_PREFIX + timestamps[-1].strftime('%Y%m%d%H%M') + RAIN_MAP_URL_SUFFIX
                 # Update timestamp from external coordinator entity
                 self._last_state = self.hass.states.get(self.entity_id).state
                 self._last_attributes = self.hass.states.get(self.entity_id).attributes
                 self._updated_attributes = dict(self._last_attributes)
                 self._updated_attributes["Updated at"] = self._last_image_time_pretty
-                self._updated_attributes["URL"] = url
-                self.hass.states.async_set(
-                    self.entity_id, self._last_state, self._updated_attributes
-                )
-                _LOGGER.debug(
-                    "Rain map image successfully updated at %s, new URL is %s",
-                    datetime.strptime(
-                        str(current_image_time), "%Y%m%d%H%M"
-                    ).isoformat(),
-                    url,
-                )
-                frame = Image.open(io.BytesIO(response.content))
-                self._images.append(frame)
-                # drop older frames when we have enough
-                if len(self._images) > 12:
-                    self._images = self._images[1:]
-                # create animated gif of rain map
-                if len(self._images) > 1:
-                    _LOGGER.debug("Converting frames to gif")
-                    buff = io.BytesIO()
-                    self._images[0].save(buff, format='GIF', save_all=True, append_images=self._images[1:], optimize=False, duration=1000, disposal=2, loop=0)
-                    self._last_image = buff.getvalue()
-                return self._last_image
-
-            except httpx.TimeoutException:
-                _LOGGER.warning(
-                    "Timeout getting camera image for %s from %s", self._name, url
-                )
-                return self._last_image
-
-            except (httpx.HTTPStatusError, httpx.RequestError) as err:
-                if response.status_code == 404:
-                    # Image not ready, check older image urls
-                    _LOGGER.debug(
-                        "%s rain map image not ready, trying previous images",
-                        current_image_time,
-                    )
-
-                    # minor fix for whole hours
-                    if str(current_image_time)[-2:] == "00":
-                        _skip_minutes = 45
-                    else:
-                        _skip_minutes = 5
-
-                    if current_image_time - _skip_minutes == self._last_image_time:
-                        return self._last_image
-                    else:
-                        return await get_image(current_image_time - _skip_minutes)
-                else:
-                    _LOGGER.warning(
-                        "Error getting new camera image for %s from %s: %s",
-                        self._name,
-                        url,
-                        err,
-                    )
-                    return self._last_image
-
-        _current_query_time = int(
-            datetime.strftime(datetime.now(timezone(timedelta(hours=8))), "%Y%m%d%H%M")
-        )
-
-        if _current_query_time != self._last_query_time:
-            self._last_query_time = _current_query_time
-            _current_image_time = math.floor(_current_query_time / 5) * 5
-            if _current_image_time != self._last_image_time:
-                return await get_image(_current_image_time)
+                self._updated_attributes["URL"] = self._last_url
+                self.hass.states.async_set(self.entity_id, self._last_state, self._updated_attributes)
+                _LOGGER.debug("Rain map image new URL is %s", self._last_url)
 
         return self._last_image
 
