@@ -1,6 +1,6 @@
 """Support for retrieving weather data from NEA."""
 from __future__ import annotations
-from PIL import Image
+from PIL import Image, ImageDraw
 import io
 import asyncio
 import logging
@@ -152,9 +152,17 @@ class NeaRainCamera(Camera):
                 self._last_image = content
                 images.append(Image.open(io.BytesIO(content)))
 
-        if len(images) > 2:
+        if len(images) > 1:
+            # draw progress bar
+            frames = []
+            for idx, frame in enumerate(images):
+                w, h = frame.size
+                progress = idx / (len(images) - 1)
+                draw = ImageDraw.Draw(frame)
+                draw.line((0,0,progress * w, 0), fill='gray', width=3) 
+                frames.append(frame)
             buff = io.BytesIO()
-            images[0].save(buff, format='GIF', save_all=True, append_images=images[1:], optimize=False, duration=1000, disposal=2, loop=0)
+            frames[0].save(buff, format='GIF', save_all=True, append_images=frames[1:], optimize=False, duration=1000, disposal=2, loop=0)
             self._last_image = buff.getvalue() 
 
             # succesfully fetched all images
