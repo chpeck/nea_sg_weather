@@ -6,7 +6,8 @@ import asyncio
 import logging
 from types import MappingProxyType
 from typing import Any
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+import pytz
 import math
 import httpx
 
@@ -27,7 +28,7 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-
+_SG_TZ = pytz.timezone('Asia/Singapore')
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -108,7 +109,8 @@ class NeaRainCamera(Camera):
             return dt + (datetime.min - dt) % delta
 
         async def get_image(timestamp: datetime) -> bytes | None:
-            url = RAIN_MAP_URL_PREFIX + timestamp.strftime('%Y%m%d%H%M') + RAIN_MAP_URL_SUFFIX
+            # make sure we use sg time for this
+            url = RAIN_MAP_URL_PREFIX + timestamp.astimezone(_SG_TZ).strftime('%Y%m%d%H%M') + RAIN_MAP_URL_SUFFIX
             _LOGGER.debug("Getting rain map image from %s", url)
             try:
                 async_client = get_async_client(self.hass, verify_ssl=self.verify_ssl)
@@ -159,7 +161,7 @@ class NeaRainCamera(Camera):
             if len(images) == len(timestamps):
                 self._last_image_time = timestamps[-1]
                 self._last_image_time_pretty = timestamps[-1].isoformat()
-                self._last_url = RAIN_MAP_URL_PREFIX + timestamps[-1].strftime('%Y%m%d%H%M') + RAIN_MAP_URL_SUFFIX
+                self._last_url = RAIN_MAP_URL_PREFIX + timestamps[-1].astimezone(_SG_TZ).strftime('%Y%m%d%H%M') + RAIN_MAP_URL_SUFFIX
                 # Update timestamp from external coordinator entity
                 self._last_state = self.hass.states.get(self.entity_id).state
                 self._last_attributes = self.hass.states.get(self.entity_id).attributes
